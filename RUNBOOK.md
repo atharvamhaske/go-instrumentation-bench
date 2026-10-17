@@ -113,8 +113,8 @@ Local:
 make clean
 ```
 
-Cloud: delete the droplets or VMs when you're done. Hourly billing stops only when the machine
-is destroyed, not when it's powered off (DigitalOcean bills powered-off droplets too).
+Cloud: delete the VMs, or scale node pools to 0 on GKE/AKS, when you're done. Billing stops only when the machine
+is deleted. A stopped VM still bills for its disk, and some providers bill reserved compute too.
 
 ## Troubleshooting
 

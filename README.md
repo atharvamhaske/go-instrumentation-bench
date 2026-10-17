@@ -158,13 +158,18 @@ app.
 The app node is the one that matters. Shared-vCPU VMs lose CPU time to other tenants (CPU
 steal), which looks exactly like instrumentation overhead.
 
-| Option | App node | Load node | Notes |
-|---|---|---|---|
-| DigitalOcean (GitHub Student Pack credit) | CPU-Optimized, 2 dedicated vCPU | Basic, 2 vCPU / 4 GB | Billed hourly. Create, run, destroy: a session costs well under $1 |
-| Oracle Cloud Always Free | Ampere A1, 2 OCPU / 12 GB | Ampere A1, 2 OCPU / 12 GB | Free, ARM, no CPU credits. Capacity is often short in popular regions |
+| Option | Free part | App node | Load node | Notes |
+|---|---|---|---|---|
+| Google Cloud, GKE Standard (zonal) | $300 trial credit for 90 days; one zonal cluster's control plane is free every month | `t2d-standard-2` or `c2d-standard-2` | `e2-standard-4` | Scale node pools to 0 between sessions. Autopilot won't work: it blocks the privileged eBPF agent |
+| Azure for Students, AKS free tier | $100 credit for 12 months, no card; AKS control plane is free | `Standard_F2s_v2` | `Standard_D4s_v5` | Student subscriptions have small vCPU quotas; two small nodes fit |
+| AWS, EC2 + k3s | up to $200 credit for 6 months (new accounts) | `c7g.large` | `m7g.large` | EKS charges $0.10/h for the control plane (~$73/month), so k3s on EC2 stretches the credit further |
+| Oracle Cloud Always Free | 2 Ampere OCPUs + 12 GB in total, forever; OKE basic clusters are free | 1 OCPU | 1 OCPU | Too small for clean numbers since July 2026, but fine for an always-on dashboard. Set `GOMAXPROCS=1` |
 
-Avoid burstable instances (AWS `t*`, GCP `e2-micro`) for measured runs. They throttle when
-credits run out.
+Avoid burstable or shared-core instances (AWS `t*`, GCP `e2-micro`/`e2-small`) for the app node.
+They throttle when credits run out or share cores with other tenants.
+
+On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so push
+`bench/conduit:*` to the provider's registry and change the `image:` lines in `k8s/`.
 
 ### Setup
 
