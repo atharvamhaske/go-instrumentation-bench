@@ -217,6 +217,19 @@ One row per `bench.sh run`.
 | `profiled` | `1` if a pprof profile was taken during the run; `report` skips these rows |
 | `time` | UTC timestamp of the end of the run |
 
+## Ceiling output: `results/ceiling.csv`
+
+One row per step of `bench.sh ceiling`, including retried steps.
+
+| Column | Meaning |
+|---|---|
+| `variant`, `rate`, `reqs`, `failed_rate`, `dropped`, `p50_ms`, `p99_ms` | as in `results.csv`, for that step |
+| `p99_limit_ms` | `CEILING_P99_MS` used for the run |
+| `pass` | `pass` if p99 ≤ limit, errors < 1% and dropped ≤ 1% of offered requests; otherwise `fail` |
+| `time` | UTC timestamp |
+
+The ceiling for a variant is the highest `rate` with `pass` before two consecutive `fail` rows.
+
 ## Startup output: `results/startup.csv`
 
 One row per `bench.sh startup`.

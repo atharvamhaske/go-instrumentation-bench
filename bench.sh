@@ -10,8 +10,10 @@
 #   all                    ROUNDS x every variant in rotating order, then report
 #   report                 medians per variant vs baseline
 #   startup <variant>      process start -> listening, -> first span, requests served untraced
+#   ceiling <variant>      step RATE up until p99 / errors / drops cross a limit; results/ceiling.csv
 # Env: RATE (req/s, default 200), DURATION (3m), WARMUP (30s), ROUNDS (3), PROFILE (0|1),
-#      JWT_SECRET (bench-secret), SKIP_DEPLOY (0|1), STARTUP_WINDOW (probe seconds, 20)
+#      JWT_SECRET (bench-secret), SKIP_DEPLOY (0|1), STARTUP_WINDOW (probe seconds, 20),
+#      CEILING_RATES ("100 200 ... 4800"), CEILING_STEP (30s), CEILING_P99_MS (25)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -140,6 +142,41 @@ run() {
     [$v, $rate, $r.reqs, ($r.failed | r3), $r.dropped, ($r.p50_ms | r3), ($r.p99_ms | r3),
      (cpu("conduit") | r3), (cpu("agent") | r3), (cpu("conduit") + cpu("agent") | r3),
      mem("conduit"), mem("agent"), $prof, (now | todate)] | map(tostring) | join(",")' | tee -a "$CSV"
+}
+
+# ceiling <variant>: step the offered rate up until p99, errors or dropped iterations cross a limit.
+# The last passing rate is the variant's capacity at that latency target.
+ceiling() {
+  local v=$1 rate result verdict last_ok=0
+  local rates=${CEILING_RATES:-"100 200 400 800 1200 1600 2400 3200 4800"}
+  local step=${CEILING_STEP:-30s} p99_max=${CEILING_P99_MS:-25}
+  local out=results/ceiling.csv
+  mkdir -p results
+  [[ -f $out ]] || echo "variant,rate,reqs,failed_rate,dropped,p50_ms,p99_ms,p99_limit_ms,pass,time" >"$out"
+
+  deploy "$v"
+  log "$v: warmup $WARMUP"
+  k6_run "${rates%% *}" "$WARMUP" >/dev/null
+  local attempt
+  for rate in $rates; do
+    # A failed step is retried once: one transient spike shouldn't set the capacity number.
+    for attempt in 1 2; do
+      restart_jaeger
+      log "$v: $rate req/s for $step (p99 limit ${p99_max}ms, attempt $attempt)"
+      result=$(k6_run "$rate" "$step")
+      # Pass: p99 under the limit, under 1% errors, under 1% of offered requests dropped.
+      verdict=$(jq -r --argjson lim "$p99_max" \
+        'if .p99_ms <= $lim and .failed < 0.01 and .dropped <= 0.01 * (.reqs + .dropped) then "pass" else "fail" end' <<<"$result")
+      jq -rn --arg v "$v" --arg rate "$rate" --arg lim "$p99_max" --arg verdict "$verdict" --argjson r "$result" '
+        def r3: . * 1000 | round / 1000;
+        [$v, $rate, $r.reqs, ($r.failed | r3), $r.dropped, ($r.p50_ms | r3), ($r.p99_ms | r3), $lim, $verdict, (now | todate)]
+        | map(tostring) | join(",")' | tee -a "$out"
+      [[ $verdict == pass ]] && break
+    done
+    [[ $verdict == pass ]] || break
+    last_ok=$rate
+  done
+  log "$v: ceiling ${last_ok} req/s at p99 <= ${p99_max}ms"
 }
 
 all() {
@@ -301,5 +338,6 @@ case $cmd in
   all) all ;;
   report) report ;;
   startup) startup "${1:?variant}" ;;
+  ceiling) ceiling "${1:?variant}" ;;
   *) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 1 ;;
 esac

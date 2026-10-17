@@ -58,11 +58,17 @@ Instrumentation overhead only makes sense below saturation. At saturation you're
 queueing.
 
 ```sh
-for r in 200 400 800 1600; do RATE=$r DURATION=1m WARMUP=20s ./bench.sh run baseline; done
+make ceiling V=baseline CEILING_P99_MS=25
 ```
 
-Look for the first rate where `p99_ms` jumps by several times, or `dropped` is above 0. Use about
-half of that rate for the session. Then delete those rows from `results/results.csv`.
+This steps the rate through `CEILING_RATES` (default `100 200 400 800 1200 1600 2400 3200 4800`),
+30s per step, and stops at the first rate that fails twice in a row: p99 above
+`CEILING_P99_MS`, more than 1% errors, or more than 1% of offered requests dropped. Rows go to
+`results/ceiling.csv`. Use about half of the baseline's ceiling as `RATE` for the session.
+
+Then run `make ceiling-all` to get every variant's ceiling at the same p99 limit. That's the
+"capacity lost to instrumentation" number. If two variants land on the same step, rerun with a
+finer list, e.g. `CEILING_RATES="1600 1800 2000 2200 2400"`.
 
 ## 3. Run the session
 

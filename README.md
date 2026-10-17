@@ -114,6 +114,18 @@ CPU per request is used instead of "average cores" because it doesn't depend on 
 window was. The kubelet only refreshes its counters every ~10s, so the script waits 20s on
 either side of the measured window while the pod is idle.
 
+### Capacity ceiling
+
+`make ceiling V=<variant>` asks how much traffic one pod can take before it breaks your latency
+target. It steps the offered rate up (`CEILING_RATES`, 30s per step) and stops at the first rate
+where p99 goes above `CEILING_P99_MS` (default 25), errors go above 1%, or more than 1% of offered
+requests are dropped. A failing step is retried once before it counts, so one spike can't set the
+number. The last passing rate is the ceiling.
+
+Comparing ceilings at the same p99 limit gives the number capacity planning actually uses:
+if baseline holds 2,000 req/s per pod and a variant holds 1,600, you need 25% more pods for the
+same traffic.
+
 ### Startup and time to first span
 
 `make startup V=<variant>` answers a different question: when a new pod starts, how long until
@@ -241,6 +253,7 @@ On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so pu
 | `make tilt V=<variant>` | live dev loop |
 | `make coverage V=<variant>` / `make coverage-all` | span and trace-context check |
 | `make startup V=<variant>` / `make startup-all` | startup time, time to first span, untraced requests |
+| `make ceiling V=<variant>` / `make ceiling-all` | highest rate that holds the p99 limit |
 | `make run V=<variant>` | warmup, measured run, one CSV row |
 | `make all` | `ROUNDS` × every variant, rotating order, then the report |
 | `make report` | medians per variant compared with baseline |
@@ -248,7 +261,8 @@ On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so pu
 | `make clean` | delete the local cluster |
 
 Knobs, as env vars or make variables: `RATE` (requests/s, default 200), `DURATION` (3m),
-`WARMUP` (30s), `ROUNDS` (3), `PROFILE` (0 or 1), `STARTUP_WINDOW` (seconds of probing, 20).
+`WARMUP` (30s), `ROUNDS` (3), `PROFILE` (0 or 1), `STARTUP_WINDOW` (seconds of probing, 20),
+`CEILING_RATES` (rates to step through), `CEILING_STEP` (30s), `CEILING_P99_MS` (25).
 
 ## Layout
 
