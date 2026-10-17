@@ -90,7 +90,10 @@ report: ## medians per variant vs baseline from results/results.csv
 	./bench.sh report
 
 ##@ aws (EKS). Order: aws-check aws-budget aws-push aws-up platform [aws-cert aws-ingress aws-dns] ... aws-down
-.PHONY: aws-check aws-budget aws-push aws-up platform aws-ingress aws-cert aws-dns aws-url aws-pause aws-resume aws-down aws-leftovers aws-ecr-delete aws-env
+.PHONY: runbook aws-check aws-budget aws-push aws-up platform aws-ingress aws-cert aws-dns aws-url aws-pause aws-resume aws-down aws-leftovers aws-ecr-delete aws-env
+runbook: ## print the AWS two-day plan and cautions from RUNBOOK.md
+	@awk '/^## 7\./ {on = 1} /^## Troubleshooting/ {on = 0} on' RUNBOOK.md
+
 aws-check: ## tools, credentials, zones, vCPU quota, cost per day
 	aws/aws.sh check
 
