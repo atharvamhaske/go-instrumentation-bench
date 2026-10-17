@@ -188,17 +188,22 @@ coverage() {
   log "$v: GET /api/articles/article-42 -> $code, trace $trace, sent parent span $parent"
   sleep 10 # batch span processors flush every 5s
 
-  curl -sS "http://localhost:26686/api/traces/$trace" | jq -r --arg parent "$parent" '
+  curl -sS "http://localhost:26686/api/traces/$trace" | jq -r --arg parent "$parent" --arg v "$v" '
     (.data[0].spans // []) as $s
     | def tag($sp; $k): ($sp.tags[] | select(.key == $k) | .value) // "";
       def par($sp): ($sp.references[0].spanID // "-");
       ($s | map(select(tag(.; "span.kind") == "server"))) as $srv
-    | "spans: \($s | length)",
+    | if $v == "baseline" then
+        "spans: \($s | length)",
+        "check: baseline emits no telemetry       \(if ($s | length) == 0 then "PASS" else "FAIL" end)"
+      else
+    "spans: \($s | length)",
       ($s | sort_by(.startTime)[]
         | "  \(.operationName)  kind=\(tag(.; "span.kind"))  id=\(.spanID)  parent=\(par(.))  \(.duration)us",
           "      attrs: \([.tags[].key | select(startswith("otel.") or startswith("span.") or . == "internal.span.format" | not)] | join(", "))"),
       "check: incoming traceparent honored      \(if ($srv | length) == 1 and par($srv[0]) == $parent then "PASS" else "FAIL" end)",
-      "check: db spans are children of server   \(if ($srv | length) == 1 and ($s | map(select(tag(.; "span.kind") == "client")) | length) > 0 and all($s[] | select(tag(.; "span.kind") == "client"); par(.) == $srv[0].spanID) then "PASS" else "FAIL" end)"'
+      "check: db spans are children of server   \(if ($srv | length) == 1 and ($s | map(select(tag(.; "span.kind") == "client")) | length) > 0 and all($s[] | select(tag(.; "span.kind") == "client"); par(.) == $srv[0].spanID) then "PASS" else "FAIL" end)"
+      end'
 }
 
 cmd=${1:-}

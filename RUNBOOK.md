@@ -31,7 +31,7 @@ check: incoming traceparent honored      PASS
 check: db spans are children of server   PASS
 ```
 
-`baseline` should show `spans: 0` and two `FAIL` lines. That is correct.
+`baseline` should show `spans: 0` and `check: baseline emits no telemetry PASS`.
 
 If an instrumented variant shows fewer than 3 spans or a `FAIL`, stop here. A cost number for a
 variant that doesn't capture the same work isn't comparable. See
