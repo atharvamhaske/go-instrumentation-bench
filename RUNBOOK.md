@@ -13,7 +13,7 @@ does; this file is just the steps.
       (`make images`, then `make cluster` locally or `./bench.sh import-k3s` on k3s).
 - [ ] Jaeger is up: `kubectl -n bench get deploy jaeger`.
 - [ ] Nothing else is running on the app node: `kubectl get pods -A -o wide --field-selector spec.nodeName=<app-node>`.
-      Only `conduit` and the system pods should show.
+      Only `conduit` and the system pods should show. If the launcher site is up, `make site-down`.
 - [ ] `results/results.csv` is either empty or only holds runs from this same setup. Move old
       files away; `report` mixes every row it finds.
 
@@ -134,6 +134,86 @@ make clean
 
 Cloud: delete the VMs, or scale node pools to 0 on GKE/AKS, when you're done. Billing stops only when the machine
 is deleted. A stopped VM still bills for its disk, and some providers bill reserved compute too.
+EKS: `make aws-down`, see below.
+
+## 7. AWS EKS: the two-day plan
+
+### Cautions, read these first
+
+- **Delete the Ingress before the cluster.** The ALB belongs to the Load Balancer Controller,
+  not to eksctl. If the cluster goes first, the ALB keeps billing, and its security groups block
+  the VPC from being deleted. `make aws-down` deletes in the right order; don't use
+  `eksctl delete cluster` directly.
+- **Pausing doesn't stop billing.** `make aws-pause` scales the nodes to 0. The control plane
+  ($2.40/day) and the ALB (~$0.85/day) still bill. Pausing also wipes Jaeger traces and
+  Prometheus history, since both live in memory.
+- **No NAT gateway, on purpose.** Nodes sit in public subnets with public IPs. Don't add
+  `privateNetworking: true` to `aws/cluster.yaml` without turning a NAT gateway back on:
+  private nodes without one can't pull images and never join.
+- **One AZ for nodes.** Both node groups are pinned to the first zone that offers both instance
+  types, so k6 → app → Jaeger traffic never crosses zones (cross-AZ traffic bills
+  $0.01/GB each way). The second zone is only there because EKS and the ALB require two.
+- **Budget first.** `make aws-budget EMAIL=...` before `make aws-up`. Budget alerts lag by up
+  to a day, so they're a safety net, not a meter.
+- **Site down before numbers.** The four site variants share the app node. Benchmark commands
+  refuse to start while they exist; `FORCE=1` overrides, but then the numbers are wrong.
+- **It's public.** Anyone with the URL can start runs, within the launcher's limits. Grafana is
+  anonymous and read-only, with the login form off. Jaeger isn't exposed. To restrict access
+  to your own IP: `make aws-ingress ALLOW_CIDR=$(curl -s https://checkip.amazonaws.com)/32`.
+- **Keep one region.** Every command uses `AWS_REGION`. Leftovers in another region don't show
+  up in `make aws-leftovers` for this one.
+
+### Day 1
+
+```sh
+aws login && export AWS_REGION=us-east-1
+make aws-check                        # stop if the vCPU quota is below 4
+make aws-budget EMAIL=you@example.com
+make aws-push                         # ~5 min on a fast connection
+make aws-up                           # ~20 min; watch CloudFormation in the console if curious
+kubectl get nodes -L bench/app,bench/load   # one node each
+make platform
+make aws-url                          # open http://<alb>/run/ (DNS can take ~3 min)
+```
+
+Optional domain, in a Route 53 hosted zone you own:
+
+```sh
+make aws-cert    HOST=bench.example.com    # waits for ACM, 2-10 min
+make aws-ingress HOST=bench.example.com
+make aws-dns     HOST=bench.example.com
+```
+
+Smoke test: start a 15s steady run at 100 req/s on the compare page with all four variants.
+The dashboard should show four latency lines within ~15s and CPU ms per request within ~1 min.
+
+Benchmarks on the same cluster:
+
+```sh
+eval "$(make aws-env)"                # REGISTRY=<account>.dkr.ecr.<region>.amazonaws.com
+make site-down
+make coverage-all && make ceiling V=baseline && RATE=<half> ROUNDS=5 make all
+make site-up                          # back to the public site (REGISTRY is still exported)
+```
+
+End of day: `make aws-pause`.
+
+### Day 2
+
+```sh
+make aws-resume                       # ~3 min for nodes to join; pods reschedule on their own
+kubectl -n bench get pods             # all Running before you share the URL
+```
+
+When you're done:
+
+```sh
+make aws-down HOST=bench.example.com  # omit HOST if you didn't set up DNS
+make aws-leftovers                    # should print nothing but ECR repos
+make aws-ecr-delete                   # if you won't come back
+```
+
+Check the Billing console the next day. Charges show up with a delay of several hours.
 
 ## Troubleshooting
 
@@ -211,6 +291,41 @@ exporters retry and drop on failure.
 ### `k3d cluster create` fails right after `make clean`
 
 The old containers are still being removed. Wait a few seconds and run `make cluster` again.
+
+### EKS: Ingress has no address
+
+```sh
+kubectl -n kube-system logs deploy/aws-load-balancer-controller | tail -20
+kubectl -n bench describe ingress bench
+```
+
+- `AccessDenied` or `WebIdentityErr`: the controller's IAM role is missing. Check that
+  `eksctl get iamserviceaccount --cluster bench` lists `aws-load-balancer-controller`, then
+  rerun `aws/aws.sh lb-controller`.
+- `couldn't auto-discover subnets`: eksctl tags its public subnets with
+  `kubernetes.io/role/elb=1`. If you changed the VPC config, tag them yourself.
+- Address set but the page times out: give DNS 3 minutes. Then check target health in the EC2
+  console under Target groups. Unhealthy targets usually mean the pod isn't Ready.
+
+### EKS: pods stuck in Pending
+
+`kubectl -n bench describe pod <pod>`. `node(s) didn't match node selector` after
+`make aws-resume` means the nodes haven't joined yet; wait. `Insufficient cpu` on the app node
+means the site and a benchmark deployment are both up. Run `make site-down`.
+
+### EKS: `make aws-down` hangs or the VPC won't delete
+
+Something outside eksctl still holds a network interface, usually an ALB that was created
+after the Ingress delete or by hand. `make aws-leftovers`, delete what it lists in the console,
+then rerun `make aws-down`. As a last resort, delete the `eksctl-bench-cluster` CloudFormation
+stack in the console.
+
+### Launcher: run starts but the dashboard is empty
+
+- `kubectl -n bench logs job/k6-site-<run id>` for remote-write errors.
+- Prometheus: `kubectl -n bench port-forward svc/prometheus 9090`, then check
+  `k6_http_reqs_total` in the UI, and Status → Targets for the cadvisor job.
+- The `run` variable in Grafana lists run ids from the last scrape; refresh the page.
 
 ### Oracle Cloud: agent node never joins
 

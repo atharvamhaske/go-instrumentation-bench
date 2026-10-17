@@ -246,3 +246,71 @@ One row per `bench.sh startup`.
 
 Probe requests use trace id `<24 random hex><request number as 8 hex>` and parent span
 `00f067aa0ba902b7`, and go to the pod IP directly, so readiness probes don't delay them.
+
+## Launcher
+
+`launcher/` serves the public site (`make site-up`, then the ALB on EKS). Standard library only.
+Every accepted run becomes a k6 Job, and the visitor is redirected to the Grafana dashboard
+filtered to that run.
+
+| Route | What it does |
+|---|---|
+| `GET /` | redirects to `/run/` |
+| `GET /run/` | list of variants and a link to the compare page |
+| `GET /run/{variant}` | form for one variant: shape, rate, duration. Unknown variant: 404 |
+| `POST /run/{variant}` | start a run against that variant |
+| `GET /run/compare` | form with variant checkboxes |
+| `POST /run/compare` | start a run against every checked variant at once (`variant` repeated) |
+| `GET /api/state` | `{"busy": bool, "seconds_left": int, "run_id": "..."}` |
+| `GET /healthz` | `ok`, used by the readiness probe and the ALB health check |
+
+Form fields: `shape` = `steady` \| `ramp` \| `spike`; `rate` = `100` \| `250` \| `500` \| `1000` \|
+`2000` (req/s per variant); `duration` = `15` \| `30` \| `60` (seconds). Anything else is a 400.
+
+POST responses:
+
+| Status | When |
+|---|---|
+| 303 | started; `Location` is `<GRAFANA_URL>/d/bench/bench?var-run_id=<id>&var-variant=<v>...` |
+| 400 | invalid input, or `rate × variants` above `MAX_TOTAL` |
+| 409 | another run is in progress (one at a time; the lock lasts `duration + 20s`) |
+| 429 | this visitor already started `RUNS_PER_HOUR` runs in the last hour |
+| 502 | the Kubernetes API refused the Job |
+
+The visitor is identified by the **last** `X-Forwarded-For` entry, the one the ALB appends.
+Earlier entries come from the client and can be forged. Run state is in memory, so the
+launcher runs as exactly one replica.
+
+The Job is named `k6-site-<run id>`, labelled `bench/run=site`, runs on the load node, is killed
+after `duration + 120s` and deleted 10 minutes after it finishes. The launcher's service account
+may only create, get and list Jobs in `bench`.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `ADDR` | `:8080` | listen address |
+| `NAMESPACE` | `bench` | where Jobs are created |
+| `K6_IMAGE` | `grafana/k6:1.8.2` | |
+| `PROM_WRITE_URL` | `http://prometheus:9090/api/v1/write` | k6 remote-write target |
+| `GRAFANA_URL` | `/grafana` | redirect prefix; the Ingress serves Grafana on the same host |
+| `JWT_SECRET` | `bench-secret` | passed to k6 so its tokens verify |
+| `MAX_TOTAL` | `2000` | cap on `rate × variants` |
+| `RUNS_PER_HOUR` | `3` | per visitor |
+
+## Site load script: `k6/site.js`
+
+One scenario per target, named after the variant and aimed at `http://conduit-<variant>:8080`.
+Each scenario is its own open-model arrival rate, so a slow variant can't slow down the others'
+offered load.
+
+| Env | Meaning |
+|---|---|
+| `TARGETS` | comma-separated variants |
+| `SHAPE` | `steady`: constant `RATE`. `ramp`: 0 to `RATE` over the duration. `spike`: 10% of `RATE` for 40%, `RATE` for the middle 20%, back to 10% |
+| `RATE` | peak req/s per variant |
+| `DURATION` | seconds |
+
+Metrics go to Prometheus through k6's `experimental-prometheus-rw` output with
+`K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)`, pushed every 5s, tagged `run_id`. Series are
+split by the `scenario` label (= variant). The request carries the tag
+`name=/api/articles/{slug}` so every slug shares one series. Without it, k6 creates one series
+per URL, more than 100k in a 30s run.

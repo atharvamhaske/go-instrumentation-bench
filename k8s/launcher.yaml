@@ -1,0 +1,70 @@
+# The public launcher. It may only create (and read) Jobs in the bench namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: launcher
+  namespace: bench
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: launcher
+  namespace: bench
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: launcher
+  namespace: bench
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: launcher}
+subjects:
+  - {kind: ServiceAccount, name: launcher, namespace: bench}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: launcher
+  namespace: bench
+spec:
+  # Run state is in memory: keep exactly one replica.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: launcher}
+  template:
+    metadata:
+      labels: {app: launcher}
+    spec:
+      serviceAccountName: launcher
+      nodeSelector: {bench/load: "true"}
+      containers:
+        - name: launcher
+          image: bench/launcher:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: JWT_SECRET, value: bench-secret}
+            - {name: MAX_TOTAL, value: "2000"}
+            - {name: RUNS_PER_HOUR, value: "3"}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: launcher
+  namespace: bench
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+spec:
+  selector: {app: launcher}
+  ports:
+    - {name: http, port: 8080}

@@ -1,0 +1,37 @@
+# eksctl config; aws/aws.sh fills in __REGION__, __AZ1__, __AZ2__, __APP_TYPE__, __LOAD_TYPE__.
+# Cost choices:
+# - No NAT gateway (~$1.08/day plus data). Nodes sit in public subnets with public IPs instead.
+# - Both node groups in one AZ: no cross-AZ traffic between k6, the app and Jaeger. The second AZ
+#   exists only because EKS and the ALB require subnets in two AZs.
+# - minSize 0 so `make aws-pause` can scale both groups to zero.
+# - No control plane logging (CloudWatch charges per GB), no EBS CSI driver (nothing persistent).
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: bench
+  region: __REGION__
+availabilityZones: [__AZ1__, __AZ2__]
+vpc:
+  nat: {gateway: Disable}
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata: {name: aws-load-balancer-controller, namespace: kube-system}
+      wellKnownPolicies: {awsLoadBalancerController: true}
+managedNodeGroups:
+  - name: app
+    instanceType: __APP_TYPE__
+    availabilityZones: [__AZ1__]
+    desiredCapacity: 1
+    minSize: 0
+    maxSize: 1
+    volumeSize: 20
+    labels: {bench/app: "true"}
+  - name: load
+    instanceType: __LOAD_TYPE__
+    availabilityZones: [__AZ1__]
+    desiredCapacity: 1
+    minSize: 0
+    maxSize: 1
+    volumeSize: 20
+    labels: {bench/load: "true"}

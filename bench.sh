@@ -11,9 +11,13 @@
 #   report                 medians per variant vs baseline
 #   startup <variant>      process start -> listening, -> first span, requests served untraced
 #   ceiling <variant>      step RATE up until p99 / errors / drops cross a limit; results/ceiling.csv
+#   observability          Prometheus + Grafana (dashboard from k8s/dashboard.json)
+#   site-up                all four variants side by side (conduit-<variant>) + the launcher
+#   site-down              remove them again; benchmark runs refuse to start while they're up
 # Env: RATE (req/s, default 200), DURATION (3m), WARMUP (30s), ROUNDS (3), PROFILE (0|1),
 #      JWT_SECRET (bench-secret), SKIP_DEPLOY (0|1), STARTUP_WINDOW (probe seconds, 20),
-#      CEILING_RATES ("100 200 ... 4800"), CEILING_STEP (30s), CEILING_P99_MS (25)
+#      CEILING_RATES ("100 200 ... 4800"), CEILING_STEP (30s), CEILING_P99_MS (25),
+#      REGISTRY (pull bench/* images from <registry>/bench/*, e.g. ECR), FORCE (0|1)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -34,17 +38,18 @@ images() {
   for v in baseline manual otelc; do
     docker build --build-arg VARIANT="$v" -t "bench/conduit:$v" service
   done
+  docker build -t bench/launcher:latest launcher
 }
 
 local_cluster() {
   k3d cluster create bench --registry-create bench-registry --k3s-arg '--disable=traefik@server:0' --wait
   kubectl label node --all bench/app=true bench/load=true --overwrite
-  k3d image import -c bench bench/conduit:baseline bench/conduit:manual bench/conduit:otelc
+  k3d image import -c bench bench/conduit:baseline bench/conduit:manual bench/conduit:otelc bench/launcher:latest
   infra
 }
 
 import_k3s() {
-  docker save bench/conduit:baseline bench/conduit:manual bench/conduit:otelc | sudo k3s ctr images import -
+  docker save bench/conduit:baseline bench/conduit:manual bench/conduit:otelc bench/launcher:latest | sudo k3s ctr images import -
 }
 
 infra() {
@@ -52,8 +57,61 @@ infra() {
   k rollout status deploy/jaeger --timeout=180s
 }
 
+# With REGISTRY set, bench/* images come from <registry>/bench/* and are always re-pulled,
+# since `make push` overwrites tags.
+registry() {
+  if [[ -n ${REGISTRY:-} ]]; then
+    sed -e "s#image: bench/#image: $REGISTRY/bench/#" -e 's/imagePullPolicy: IfNotPresent/imagePullPolicy: Always/'
+  else
+    cat
+  fi
+}
+
 manifest() {
-  if [[ $1 == goauto ]]; then cat k8s/app-goauto.yaml; else sed "s/__VARIANT__/$1/g" k8s/app.yaml; fi
+  if [[ $1 == goauto ]]; then cat k8s/app-goauto.yaml; else sed "s/__VARIANT__/$1/g" k8s/app.yaml; fi | registry
+}
+
+k6_scripts() {
+  k create configmap k6-script --from-file=k6/ --dry-run=client -o yaml | k apply -f - >/dev/null
+}
+
+observability() {
+  k create configmap grafana-dashboards --from-file=bench.json=k8s/dashboard.json --dry-run=client -o yaml | k apply -f - >/dev/null
+  kubectl apply -f k8s/observability.yaml
+  k rollout restart deploy/grafana >/dev/null # pick up dashboard changes
+  k rollout status deploy/prometheus --timeout=180s
+  k rollout status deploy/grafana --timeout=180s
+}
+
+# Site mode: every variant at once as conduit-<variant>, with a quarter core requested each so
+# all four (plus the eBPF agent) fit on one 2-vCPU app node. Fine for live demos, not for numbers.
+site_manifest() {
+  manifest "$1" | sed -e "s/^  name: conduit$/  name: conduit-$1/" \
+    -e "s/{app: conduit}/{app: conduit-$1}/" -e "s/{app: conduit, /{app: conduit-$1, /" \
+    -e 's/requests: {cpu: "1",/requests: {cpu: 250m,/'
+}
+
+site_up() {
+  k6_scripts
+  for v in "${VARIANTS[@]}"; do site_manifest "$v" | k apply -f - >/dev/null; done
+  registry <k8s/launcher.yaml | k apply -f - >/dev/null
+  for d in "${VARIANTS[@]/#/conduit-}" launcher; do k rollout status "deploy/$d" --timeout=180s >/dev/null; done
+  log "site is up"
+}
+
+site_down() {
+  for v in "${VARIANTS[@]}"; do k delete deploy,svc "conduit-$v" --ignore-not-found >/dev/null; done
+  k delete deploy launcher --ignore-not-found >/dev/null
+  k delete job -l bench/run=site --ignore-not-found >/dev/null
+  log "site is down"
+}
+
+# Site variants share the app node with the benchmark pod and would skew its CPU numbers.
+site_guard() {
+  if [[ ${FORCE:-0} != 1 ]] && k get deploy -o name | grep -qE '/(conduit-|launcher$)'; then
+    log "site deployments are running on the app node: ./bench.sh site-down first (or FORCE=1)"
+    exit 1
+  fi
 }
 
 undeploy() {
@@ -79,7 +137,7 @@ restart_jaeger() {
 # k6_run <rate> <duration>: prints k6's RESULT JSON.
 k6_run() {
   k delete job k6 --ignore-not-found --wait >/dev/null
-  k create configmap k6-script --from-file=k6/article.js --dry-run=client -o yaml | k apply -f - >/dev/null
+  k6_scripts
   sed -e "s/__RATE__/$1/" -e "s/__DURATION__/$2/" k8s/k6-job.yaml | k apply -f - >/dev/null
   local s=""
   until [[ -n $s ]]; do
@@ -334,10 +392,13 @@ case $cmd in
   import-k3s) import_k3s ;;
   infra) infra ;;
   coverage) coverage "${1:?variant}" ;;
-  run) run "${1:?variant}" ;;
-  all) all ;;
+  run) site_guard && run "${1:?variant}" ;;
+  all) site_guard && all ;;
   report) report ;;
-  startup) startup "${1:?variant}" ;;
-  ceiling) ceiling "${1:?variant}" ;;
+  startup) site_guard && startup "${1:?variant}" ;;
+  ceiling) site_guard && ceiling "${1:?variant}" ;;
+  observability) observability ;;
+  site-up) site_up ;;
+  site-down) site_down ;;
   *) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 1 ;;
 esac

@@ -1,0 +1,92 @@
+{
+  "uid": "bench",
+  "title": "Go instrumentation bench",
+  "schemaVersion": 41,
+  "refresh": "5s",
+  "time": {"from": "now-5m", "to": "now"},
+  "tags": ["bench"],
+  "templating": {
+    "list": [
+      {
+        "name": "run_id",
+        "label": "run",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": {"query": "label_values(k6_http_reqs_total, run_id)", "refId": "run_id"},
+        "refresh": 2,
+        "sort": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "variant",
+        "type": "custom",
+        "query": "baseline,manual,otelc,goauto",
+        "multi": true,
+        "includeAll": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Latency p50 / p99 (client side, k6)",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "1000 * max by (scenario) (k6_http_req_duration_p99{run_id=~\"$run_id\", scenario=~\"$variant\"})", "legendFormat": "{{scenario}} p99"},
+        {"refId": "B", "expr": "1000 * max by (scenario) (k6_http_req_duration_p50{run_id=~\"$run_id\", scenario=~\"$variant\"})", "legendFormat": "{{scenario}} p50"}
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Requests per second",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "sum by (scenario) (rate(k6_http_reqs_total{run_id=~\"$run_id\", scenario=~\"$variant\"}[15s]))", "legendFormat": "{{scenario}}"}
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "CPU ms per request (app + agent)",
+      "description": "Container CPU from cAdvisor divided by k6 request rate. Lags about 15s behind the load.",
+      "gridPos": {"x": 0, "y": 9, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms", "decimals": 3}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "1000 * sum by (variant) (label_replace(rate(container_cpu_usage_seconds_total{namespace=\"bench\", pod=~\"conduit-$variant-.*\", container=~\"conduit|agent\"}[1m]), \"variant\", \"$1\", \"pod\", \"conduit-([a-z]+)-.*\")) / sum by (variant) (label_replace(rate(k6_http_reqs_total{run_id=~\"$run_id\", scenario=~\"$variant\"}[1m]), \"variant\", \"$1\", \"scenario\", \"(.*)\"))", "legendFormat": "{{variant}}"}
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "CPU cores by container",
+      "gridPos": {"x": 12, "y": 9, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 2}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "sum by (variant, container) (label_replace(rate(container_cpu_usage_seconds_total{namespace=\"bench\", pod=~\"conduit-$variant-.*\", container=~\"conduit|agent\"}[30s]), \"variant\", \"$1\", \"pod\", \"conduit-([a-z]+)-.*\"))", "legendFormat": "{{variant}} {{container}}"}
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Memory working set",
+      "gridPos": {"x": 0, "y": 18, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "sum by (variant, container) (label_replace(container_memory_working_set_bytes{namespace=\"bench\", pod=~\"conduit-$variant-.*\", container=~\"conduit|agent\"}, \"variant\", \"$1\", \"pod\", \"conduit-([a-z]+)-.*\"))", "legendFormat": "{{variant}} {{container}}"}
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Failed requests and dropped iterations",
+      "description": "Dropped iterations: k6 couldn't start a request on time because the target was too slow.",
+      "gridPos": {"x": 12, "y": 18, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "sum by (scenario) (rate(k6_http_reqs_total{run_id=~\"$run_id\", scenario=~\"$variant\", expected_response=\"false\"}[15s]))", "legendFormat": "{{scenario}} failed/s"},
+        {"refId": "B", "expr": "sum by (scenario) (rate(k6_dropped_iterations_total{run_id=~\"$run_id\", scenario=~\"$variant\"}[15s]))", "legendFormat": "{{scenario}} dropped/s"}
+      ]
+    }
+  ]
+}

@@ -206,14 +206,18 @@ steal), which looks exactly like instrumentation overhead.
 |---|---|---|---|---|
 | Google Cloud, GKE Standard (zonal) | $300 trial credit for 90 days; one zonal cluster's control plane is free every month | `t2d-standard-2` or `c2d-standard-2` | `e2-standard-4` | Scale node pools to 0 between sessions. Autopilot won't work: it blocks the privileged eBPF agent |
 | Azure for Students, AKS free tier | $100 credit for 12 months, no card; AKS control plane is free | `Standard_F2s_v2` | `Standard_D4s_v5` | Student subscriptions have small vCPU quotas; two small nodes fit |
-| AWS, EC2 + k3s | up to $200 credit for 6 months (new accounts, Free plan) | `c7i-flex.large` | `m7i-flex.large` | The Free plan only allows `t3`/`t4g` micro and small, `c7i-flex.large` and `m7i-flex.large`. EKS charges $0.10/h for the control plane (~$73/month), so use k3s on EC2. See [AWS step by step](#aws-step-by-step) |
+| AWS, EKS | up to $200 credit for 6 months (new accounts) | `c7i.large` | `m7i.large` | Everything scripted, plus the public launcher site: [Live site on AWS EKS](#live-site-on-aws-eks). About $8/day while running |
+| AWS, EC2 + k3s | same | `c7i-flex.large` | `m7i-flex.large` | Cheapest AWS option, about $4.50/day, benchmarks only. The Free plan only allows `t3`/`t4g` micro and small, `c7i-flex.large` and `m7i-flex.large`. See [AWS step by step](#aws-step-by-step) |
 | Oracle Cloud Always Free | 2 Ampere OCPUs + 12 GB in total, forever; OKE basic clusters are free | 1 OCPU | 1 OCPU | Too small for clean numbers since July 2026, but fine for an always-on dashboard. Set `GOMAXPROCS=1` |
 
 Avoid burstable or shared-core instances (AWS `t*`, GCP `e2-micro`/`e2-small`) for the app node.
 They throttle when credits run out or share cores with other tenants.
 
-On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so push
-`bench/conduit:*` to the provider's registry and change the `image:` lines in `k8s/`.
+On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images. Push the images to
+the provider's registry and set `REGISTRY=<registry host>`: `bench.sh` then rewrites every
+`image: bench/...` to `image: $REGISTRY/bench/...` and sets `imagePullPolicy: Always`. On EKS,
+`make aws-push` and `eval "$(make aws-env)"` do both. The Dockerfiles cross-compile, so
+`docker buildx build --platform linux/amd64` on an ARM Mac doesn't run Go under emulation.
 
 ### Setup
 
@@ -299,6 +303,111 @@ aws ec2 terminate-instances --instance-ids $IDS && aws ec2 delete-security-group
 Set a billing alarm or AWS Budget at, say, $20 before the first run. On the Free plan you can't
 be charged past the credit, but the account closes when the credit runs out.
 
+## Live site on AWS EKS
+
+A public page like [o11y.raashed.com/run](https://o11y.raashed.com/run/): a visitor picks a
+variant (or several), a load shape, a rate and a duration, and lands on a live Grafana
+dashboard while k6 runs. The same cluster also runs the regular benchmarks.
+
+```
+  browser ── https://bench.example.com ──► Route 53 (alias) ──► ALB (TLS cert from ACM)
+                                                                  │  /         → launcher
+                                                                  │  /grafana  → Grafana
+  laptop ── make aws-push ──► ECR                                 │
+         ── make aws-up / platform (eksctl, helm, kubectl)        │
+                                                                  ▼
+  ┌───────────────────── EKS cluster "bench" (one AZ, public subnets, no NAT) ─────────────────────┐
+  │  node group "load"  m7i.large  bench/load=true      node group "app"  c7i.large  bench/app=true │
+  │    launcher ── creates ──► k6 Job ─────── GET /api/articles/{slug} ──►  conduit-baseline        │
+  │    Grafana ◄── Prometheus ◄── remote write (k6)                         conduit-manual          │
+  │                    ▲   └──── scrapes cAdvisor (CPU, memory) ◄────────── conduit-otelc           │
+  │    Jaeger ◄──────────────────── OTLP spans ──────────────────────────── conduit-goauto + agent  │
+  │  kube-system: AWS Load Balancer Controller (turns the Ingress into the ALB)                    │
+  └────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**What happens on a run.** The launcher checks the limits (one test at a time, 3 per visitor
+per hour, at most 2,000 req/s summed across variants) and creates a k6 Job on the load node.
+k6 runs `k6/site.js`, with one open-model scenario per chosen variant hitting
+`conduit-<variant>`. It pushes p50/p95/p99 and request counts to Prometheus every 5s, tagged
+with the run id. Prometheus also scrapes per-container CPU and memory from each kubelet. The
+visitor is redirected to Grafana, filtered to their run and variants: latency, req/s, CPU ms per
+request (app + agent), CPU cores per container, memory, and failures and drops.
+
+**Site mode vs benchmark mode.** For the site, all four variants run side by side on the app
+node with a quarter core requested each. That's fine for a live demo and wrong for the talk's
+numbers, because they share CPU. `make run`, `ceiling`, `startup` and `all` refuse to start
+while the site deployments exist. Run `make site-down` first and `make site-up` afterwards.
+
+### Tools
+
+| Tool | Used for |
+|---|---|
+| `aws` CLI v2 | credentials, ECR, ACM, Route 53, budgets, leftover checks |
+| `eksctl` | creates and deletes the cluster, node groups, VPC and IAM role for the LB controller (CloudFormation underneath) |
+| `helm` | installs the AWS Load Balancer Controller |
+| `kubectl` | everything inside the cluster |
+| `docker buildx` | builds linux/amd64 images and pushes them to ECR |
+| `jq` | JSON in the scripts |
+
+`brew install awscli eksctl helm kubectl jq`. The scripts are bash 3.2 compatible, so macOS's
+own bash works.
+
+### Cost
+
+us-east-1 on-demand prices; other regions are within ~15%.
+
+| Item | Per hour | Per day |
+|---|---|---|
+| EKS control plane | $0.10 | $2.40 |
+| `c7i.large` app node | ~$0.089 | ~$2.14 |
+| `m7i.large` load node | ~$0.101 | ~$2.42 |
+| ALB at demo traffic, incl. its 2 public IPv4 | ~$0.035 | ~$0.85 |
+| node public IPv4 ×2 + 2×20 GB gp3 | | ~$0.35 |
+| **Running** | | **~$8** |
+| **Paused** (`make aws-pause`: nodes at 0) | | **~$3** (control plane + ALB) |
+| ECR images (~200 MB) | | cents per month |
+
+One day running costs about $8, two days about $16. The usual surprise costs are avoided on
+purpose:
+- No NAT gateway. It would add ~$1.08/day plus traffic.
+- Both nodes in one AZ, so there's no cross-AZ traffic. The second AZ only exists because the
+  ALB requires two.
+- No CloudWatch control plane logs.
+- No persistent volumes. Prometheus and Jaeger keep their data in memory or an emptyDir.
+
+`make aws-down` deletes in the right order and then lists anything that's left.
+
+The nodes are regular `c7i`/`m7i`, not `-flex`, so CPU isn't throttled. The Free plan only
+allows the `-flex` sizes: run with `APP_TYPE=c7i-flex.large LOAD_TYPE=m7i-flex.large` and see
+the flex caveat in [AWS step by step](#aws-step-by-step). Either way, two `.large` nodes use 4
+vCPUs, under the default quota of 5.
+
+### Commands, in order
+
+```sh
+aws login                                       # or aws configure sso
+export AWS_REGION=us-east-1                     # pick one and keep it
+make aws-check                                  # tools, credentials, zones, vCPU quota, cost
+make aws-budget EMAIL=you@example.com           # $25/month budget with email alerts
+make aws-push                                   # ECR repos + linux/amd64 images
+make aws-up                                     # EKS + LB controller, ~20 min
+make platform                                   # Jaeger, Prometheus, Grafana, site, launcher, ALB
+make aws-url                                    # http://<alb>/run/
+
+# optional, with a domain in Route 53:
+make aws-cert    HOST=bench.example.com         # ACM cert, validated through Route 53
+make aws-ingress HOST=bench.example.com         # ALB switches to HTTPS, HTTP redirects
+make aws-dns     HOST=bench.example.com         # alias record → ALB
+
+make aws-pause                                  # end of day: nodes to 0
+make aws-resume                                 # next morning
+make aws-down HOST=bench.example.com            # done: Ingress → ALB → DNS → cluster → leftovers
+```
+
+The step-by-step version with checks and cautions is in
+[RUNBOOK.md](RUNBOOK.md#7-aws-eks-the-two-day-plan).
+
 ## Commands
 
 `make help` lists everything. The ones you'll use:
@@ -313,12 +422,30 @@ be charged past the credit, but the account closes when the credit runs out.
 | `make run V=<variant>` | warmup, measured run, one CSV row |
 | `make all` | `ROUNDS` × every variant, rotating order, then the report |
 | `make report` | medians per variant compared with baseline |
-| `make test` / `make lint` | service test; gofmt, go vet for both builds, shellcheck |
+| `make observability` | Prometheus + Grafana with the bench dashboard |
+| `make site-up` / `make site-down` | all four variants side by side + the launcher, or remove them |
+| `make aws-*`, `make platform` | EKS lifecycle, see [Live site on AWS EKS](#live-site-on-aws-eks) |
+| `make test` / `make lint` | service and launcher tests; gofmt, go vet, shellcheck, dashboard JSON |
 | `make clean` | delete the local cluster |
 
 Knobs, as env vars or make variables: `RATE` (requests/s, default 200), `DURATION` (3m),
 `WARMUP` (30s), `ROUNDS` (3), `PROFILE` (0 or 1), `STARTUP_WINDOW` (seconds of probing, 20),
-`CEILING_RATES` (rates to step through), `CEILING_STEP` (30s), `CEILING_P99_MS` (25).
+`CEILING_RATES` (rates to step through), `CEILING_STEP` (30s), `CEILING_P99_MS` (25),
+`REGISTRY` (pull images from a registry), `FORCE=1` (run benchmarks with the site up).
+AWS ones: `AWS_REGION`, `HOST`, `ZONE_ID`, `EMAIL`, `BUDGET_USD`, `APP_TYPE`, `LOAD_TYPE`,
+`ALLOW_CIDR`.
+
+### The site locally
+
+```sh
+make cluster observability site-up
+kubectl -n bench port-forward svc/launcher 8081:8080 &
+kubectl -n bench port-forward svc/grafana 3000 &
+```
+
+Start a run at http://localhost:8081/run/ and open http://localhost:3000/grafana/. The
+redirect after starting a run goes to `/grafana` on the launcher's port, which only works
+behind the Ingress, where both share one host.
 
 ## Layout
 
@@ -330,14 +457,26 @@ service/
   telemetry_off.go      no-op hooks for baseline / otelc / goauto builds
   telemetry_manual.go   SDK setup, otelhttp, otelsql (build tag `manual`)
   articles_test.go      handler test against a small seed
-  Dockerfile            VARIANT=baseline|manual|otelc
+  Dockerfile            VARIANT=baseline|manual|otelc, cross-compiles
+launcher/
+  main.go               public run pages, limits, k6 Jobs via the Kubernetes API (stdlib only)
+  main_test.go          against a fake Kubernetes API
 k8s/
   infra.yaml            namespace + Jaeger, on the load node
   app.yaml              baseline / manual / otelc Deployment template
   app-goauto.yaml       baseline image + privileged eBPF agent sidecar
   k6-job.yaml           k6 Job, on the load node
-k6/article.js           load script; signs its own JWTs, sends a fresh traceparent per request
-bench.sh                every command the Makefile wraps
+  observability.yaml    Prometheus (cAdvisor scrape, remote-write receiver) + Grafana
+  dashboard.json        the Grafana dashboard
+  launcher.yaml         launcher Deployment, Service, RBAC
+k6/
+  lib.js                JWTs, traceparent, the request
+  article.js            benchmark script, prints a RESULT line
+  site.js               launcher script: one scenario per variant, steady / ramp / spike
+aws/
+  cluster.yaml          eksctl config: one AZ, public subnets, no NAT, node groups app + load
+  aws.sh                every AWS command the Makefile wraps
+bench.sh                every cluster command the Makefile wraps
 Tiltfile                dev loop
 docs/API.md             endpoints, config, data model, CSV columns
 RUNBOOK.md              session checklist and troubleshooting
