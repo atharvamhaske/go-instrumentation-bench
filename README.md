@@ -180,13 +180,13 @@ credits run out.
    ```sh
    curl -sfL https://get.k3s.io | K3S_URL=https://<load-node-private-ip>:6443 K3S_TOKEN=<token> sh -
    curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER && newgrp docker
-   git clone <this repo> && cd go-instrumentation-bench
+   git clone https://github.com/atharvamhaske/go-instrumentation-bench.git && cd go-instrumentation-bench
    make images && ./bench.sh import-k3s
    ```
 4. Load node, label the nodes and deploy Jaeger:
    ```sh
    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-   git clone <this repo> && cd go-instrumentation-bench
+   git clone https://github.com/atharvamhaske/go-instrumentation-bench.git && cd go-instrumentation-bench
    kubectl label node <app-node> bench/app=true
    kubectl label node <load-node> bench/load=true
    make infra
