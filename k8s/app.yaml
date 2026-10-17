@@ -1,0 +1,48 @@
+# baseline, manual and otelc variants. scripts/deploy.sh replaces __VARIANT__.
+# Every variant gets identical env, so sampling and export settings stay comparable;
+# the baseline simply ignores them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conduit
+  namespace: bench
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: conduit}
+  template:
+    metadata:
+      labels: {app: conduit, variant: __VARIANT__}
+    spec:
+      nodeSelector: {bench/app: "true"}
+      containers:
+        - name: conduit
+          image: bench/conduit:__VARIANT__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - {name: GOMAXPROCS, value: "2"}
+            - {name: PPROF_ADDR, value: ":6060"}
+            - {name: OTEL_SERVICE_NAME, value: conduit-__VARIANT__}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://jaeger:4318"}
+            - {name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf}
+            - {name: OTEL_TRACES_SAMPLER, value: always_on}
+            - {name: OTEL_PROPAGATORS, value: "tracecontext,baggage"}
+            - {name: OTEL_METRICS_EXPORTER, value: none}
+            - {name: OTEL_LOGS_EXPORTER, value: none}
+          readinessProbe:
+            tcpSocket: {port: 8080}
+          resources:
+            requests: {cpu: "1", memory: 128Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conduit
+  namespace: bench
+spec:
+  selector: {app: conduit}
+  ports:
+    - {name: http, port: 8080}

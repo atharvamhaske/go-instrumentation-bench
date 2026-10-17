@@ -1,0 +1,59 @@
+# goauto variant: the untouched baseline binary plus the eBPF auto-instrumentation agent as a
+# sidecar. The agent's CPU is reported separately; uprobe handlers run on the app's threads
+# and are already charged to the conduit container.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conduit
+  namespace: bench
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: conduit}
+  template:
+    metadata:
+      labels: {app: conduit, variant: goauto}
+    spec:
+      nodeSelector: {bench/app: "true"}
+      shareProcessNamespace: true
+      containers:
+        - name: conduit
+          image: bench/conduit:baseline
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - {name: GOMAXPROCS, value: "2"}
+            - {name: PPROF_ADDR, value: ":6060"}
+          readinessProbe:
+            tcpSocket: {port: 8080}
+          resources:
+            requests: {cpu: "1", memory: 128Mi}
+            limits: {memory: 512Mi}
+        - name: agent
+          image: ghcr.io/open-telemetry/opentelemetry-go-instrumentation/autoinstrumentation-go:v0.24.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: OTEL_GO_AUTO_TARGET_EXE, value: /app/conduit}
+            - {name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT, value: "true"}
+            - {name: OTEL_SERVICE_NAME, value: conduit-goauto}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://jaeger:4318"}
+            - {name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf}
+            - {name: OTEL_TRACES_SAMPLER, value: always_on}
+            - {name: OTEL_PROPAGATORS, value: "tracecontext,baggage"}
+          securityContext:
+            runAsUser: 0
+            privileged: true
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conduit
+  namespace: bench
+spec:
+  selector: {app: conduit}
+  ports:
+    - {name: http, port: 8080}

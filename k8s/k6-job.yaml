@@ -1,0 +1,24 @@
+# scripts/run.sh replaces __RATE__ and __DURATION__ and reads the RESULT line from the logs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6
+  namespace: bench
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: {bench/load: "true"}
+      containers:
+        - name: k6
+          image: grafana/k6:1.8.2
+          args: ["run", "--quiet", "/scripts/article.js"]
+          env:
+            - {name: RATE, value: "__RATE__"}
+            - {name: DURATION, value: "__DURATION__"}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts}
+      volumes:
+        - name: scripts
+          configMap: {name: k6-script}
