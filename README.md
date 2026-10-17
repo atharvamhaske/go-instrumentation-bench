@@ -206,7 +206,7 @@ steal), which looks exactly like instrumentation overhead.
 |---|---|---|---|---|
 | Google Cloud, GKE Standard (zonal) | $300 trial credit for 90 days; one zonal cluster's control plane is free every month | `t2d-standard-2` or `c2d-standard-2` | `e2-standard-4` | Scale node pools to 0 between sessions. Autopilot won't work: it blocks the privileged eBPF agent |
 | Azure for Students, AKS free tier | $100 credit for 12 months, no card; AKS control plane is free | `Standard_F2s_v2` | `Standard_D4s_v5` | Student subscriptions have small vCPU quotas; two small nodes fit |
-| AWS, EC2 + k3s | up to $200 credit for 6 months (new accounts) | `c7g.large` | `m7g.large` | EKS charges $0.10/h for the control plane (~$73/month), so k3s on EC2 stretches the credit further |
+| AWS, EC2 + k3s | up to $200 credit for 6 months (new accounts, Free plan) | `c7i-flex.large` | `m7i-flex.large` | The Free plan only allows `t3`/`t4g` micro and small, `c7i-flex.large` and `m7i-flex.large`. EKS charges $0.10/h for the control plane (~$73/month), so use k3s on EC2. See [AWS step by step](#aws-step-by-step) |
 | Oracle Cloud Always Free | 2 Ampere OCPUs + 12 GB in total, forever; OKE basic clusters are free | 1 OCPU | 1 OCPU | Too small for clean numbers since July 2026, but fine for an always-on dashboard. Set `GOMAXPROCS=1` |
 
 Avoid burstable or shared-core instances (AWS `t*`, GCP `e2-micro`/`e2-small`) for the app node.
@@ -242,6 +242,62 @@ On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so pu
    ```
 5. Follow [RUNBOOK.md](RUNBOOK.md): coverage, find the rate, run the rounds, check the numbers,
    tear down.
+
+### AWS step by step
+
+Two instances in the default VPC: `bench-app` (`c7i-flex.large`, 2 vCPU / 4 GB) and `bench-load`
+(`m7i-flex.large`, 2 vCPU / 8 GB). Together they use 4 vCPUs, which fits a new account's default
+quota of 5. Both are x86, so the images are built on the app node itself.
+
+Flex instances guarantee 40% of each vCPU and can run at 100% most of the time, but not always.
+That's fine below saturation, which is where the steady-state runs happen. For `make ceiling`,
+watch `vmstat 5` on the app node; a non-zero `st` column means the numbers near the top are
+partly the instance, not the instrumentation.
+
+From your laptop, with the AWS CLI configured:
+
+```sh
+export AWS_REGION=ap-south-1   # pick one close to you and stick with it
+
+SG=$(aws ec2 create-security-group --group-name bench --description "go-instrumentation-bench" \
+  --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol -1 --source-group "$SG"
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 \
+  --cidr "$(curl -s https://checkip.amazonaws.com)/32"
+
+aws ec2 create-key-pair --key-name bench --query KeyMaterial --output text > bench.pem && chmod 600 bench.pem
+AMI=$(aws ssm get-parameter --query Parameter.Value --output text \
+  --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id)
+
+for spec in bench-app:c7i-flex.large bench-load:m7i-flex.large; do
+  aws ec2 run-instances --image-id "$AMI" --instance-type "${spec#*:}" --key-name bench \
+    --security-group-ids "$SG" \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=20,VolumeType=gp3}' \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${spec%%:*}}]" >/dev/null
+done
+
+aws ec2 describe-instances --filters Name=tag:Name,Values=bench-app,bench-load Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress,PrivateIpAddress]' --output table
+```
+
+Then `ssh -i bench.pem ubuntu@<public ip>` into each one and follow [Setup](#setup) from step 2,
+using the load node's **private** IP for `K3S_URL`. The security group already lets the two
+instances talk to each other on every port, and nothing but SSH is open to the internet.
+
+**Costs.** About $0.18/hour for both instances while they run, plus a few dollars a month for the
+two 20 GB disks and public IPv4 addresses. Between sessions, stop them instead of deleting them:
+disks, k3s and the images survive, and private IPs stay the same.
+
+```sh
+IDS=$(aws ec2 describe-instances --filters Name=tag:Name,Values=bench-app,bench-load \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+aws ec2 stop-instances --instance-ids $IDS    # end of session
+aws ec2 start-instances --instance-ids $IDS   # next session
+aws ec2 terminate-instances --instance-ids $IDS && aws ec2 delete-security-group --group-id "$SG"   # done for good
+```
+
+Set a billing alarm or AWS Budget at, say, $20 before the first run. On the Free plan you can't
+be charged past the credit, but the account closes when the credit runs out.
 
 ## Commands
 
