@@ -174,6 +174,13 @@ conduit                 serve
 conduit -seed <path>    write the deterministic seed database to <path> and exit
 ```
 
+The image entrypoint wraps the binary in a small shell step:
+
+1. If `START_GATE` is set, wait until `/tmp/go` exists (`bench.sh startup` creates it with
+   `kubectl exec`).
+2. Print `process-start`. The container runtime timestamps this line, which marks time zero.
+3. `exec /app/conduit`, so the process keeps the `/app/conduit` path that the eBPF agent looks for.
+
 ## Data model
 
 SQLite, created by `service/seed.go`. Timestamps are unix milliseconds.
@@ -209,3 +216,20 @@ One row per `bench.sh run`.
 | `app_mem_mb`, `agent_mem_mb` | working set at the end of the run |
 | `profiled` | `1` if a pprof profile was taken during the run; `report` skips these rows |
 | `time` | UTC timestamp of the end of the run |
+
+## Startup output: `results/startup.csv`
+
+One row per `bench.sh startup`.
+
+| Column | Meaning |
+|---|---|
+| `variant` | as above |
+| `startup_ms` | from the `process-start` log line to the `conduit listening` log line |
+| `first_span_ms` | from `process-start` to the start time of the first server span. `-` if nothing was traced |
+| `ok_requests` | probe requests answered with 200 during the window |
+| `traced_requests` | of those, how many have a server span in Jaeger |
+| `untraced_before_first_span` | answered requests sent before the first traced one |
+| `time` | UTC timestamp |
+
+Probe requests use trace id `<24 random hex><request number as 8 hex>` and parent span
+`00f067aa0ba902b7`, and go to the pod IP directly, so readiness probes don't delay them.

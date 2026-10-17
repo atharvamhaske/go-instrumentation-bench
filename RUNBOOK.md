@@ -39,6 +39,19 @@ variant that doesn't capture the same work isn't comparable. See
 
 Save the output; it's the "coverage" slide.
 
+## 1b. Startup and time to first span
+
+```sh
+ROUNDS=3 make startup-all
+```
+
+Writes `results/startup.csv` and prints it. Expect `untraced_before_first_span` = 0 for `manual`
+and `otelc`, a handful for `goauto`, and every request for `baseline`. Take the median of the
+rounds; a single `goauto` run depends on where in its 2s polling cycle the agent was.
+
+If `first_span_ms` shows `-` for an instrumented variant, nothing was traced within
+`STARTUP_WINDOW` seconds. Raise it (`STARTUP_WINDOW=40`) and check the agent or exporter logs.
+
 ## 2. Find the rate
 
 Instrumentation overhead only makes sense below saturation. At saturation you're measuring

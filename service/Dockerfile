@@ -20,4 +20,6 @@ RUN case "$VARIANT" in \
 
 FROM alpine:3.22
 COPY --from=build /out/ /app/
-ENTRYPOINT ["/app/conduit"]
+# "process-start" gives `bench.sh startup` a container-runtime timestamp for the moment before
+# exec. With START_GATE set, the process waits for /tmp/go so the prober is already running.
+ENTRYPOINT ["/bin/sh", "-c", "if [ -n \"$START_GATE\" ]; then until [ -f /tmp/go ]; do sleep 0.05; done; fi; echo process-start; exec /app/conduit \"$@\"", "--"]

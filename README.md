@@ -114,6 +114,38 @@ CPU per request is used instead of "average cores" because it doesn't depend on 
 window was. The kubelet only refreshes its counters every ~10s, so the script waits 20s on
 either side of the measured window while the pod is idle.
 
+### Startup and time to first span
+
+`make startup V=<variant>` answers a different question: when a new pod starts, how long until
+it serves, and how long until its requests are actually traced?
+
+The image entrypoint can hold the process behind a gate (`START_GATE=1`). `bench.sh startup`
+deploys the variant gated, starts a prober pod that hits the pod IP every ~60 ms, then opens the
+gate. Each probe request carries a numbered trace id, so every span maps back to the request
+that caused it. All timestamps come from the app node's clock: container runtime log timestamps
+for `process-start` and `conduit listening`, and span start times for the first span.
+
+| Column | Meaning |
+|---|---|
+| `startup_ms` | process exec until the HTTP listener is up. Includes Go runtime init, otelc's SDK init (which runs in `init()`, before `main`) and the manual SDK setup |
+| `first_span_ms` | process exec until the start of the first server span. Resolution is the probe interval, ~60 ms |
+| `untraced_before_first_span` | requests answered with 200 before the first traced one. These are invisible in your traces |
+
+One local run:
+
+| variant | startup_ms | first_span_ms | untraced requests |
+|---|---|---|---|
+| baseline | 3.4 | - | all |
+| manual | 8.3 | 22 | 0 |
+| otelc | 9.4 | 58 | 0 |
+| goauto | 2.9 | 595 | 10 |
+
+The in-process approaches pay a few milliseconds at startup and trace from the first request.
+`goauto` starts as fast as baseline, because the binary is the baseline, but the agent has to
+notice the process (it polls every 2s), read its binary and load the probes. Everything served in
+that window goes untraced. For a long-running service that hardly matters. For short-lived jobs,
+autoscaling bursts or crash loops, it can be the very traffic you wanted to see.
+
 Profiling isn't free either. Profiled runs are written with `profiled=1` and left out of the
 report, and comparing them with the unprofiled runs shows what the profiler costs. In a quick
 local check, the same otelc build used 1.16 ms of CPU per request with the profiler running and
@@ -208,6 +240,7 @@ On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so pu
 | `make cluster` | local k3d cluster with registry, images imported, Jaeger deployed |
 | `make tilt V=<variant>` | live dev loop |
 | `make coverage V=<variant>` / `make coverage-all` | span and trace-context check |
+| `make startup V=<variant>` / `make startup-all` | startup time, time to first span, untraced requests |
 | `make run V=<variant>` | warmup, measured run, one CSV row |
 | `make all` | `ROUNDS` × every variant, rotating order, then the report |
 | `make report` | medians per variant compared with baseline |
@@ -215,7 +248,7 @@ On managed Kubernetes (GKE, AKS, EKS) the nodes can't import local images, so pu
 | `make clean` | delete the local cluster |
 
 Knobs, as env vars or make variables: `RATE` (requests/s, default 200), `DURATION` (3m),
-`WARMUP` (30s), `ROUNDS` (3), `PROFILE` (0 or 1).
+`WARMUP` (30s), `ROUNDS` (3), `PROFILE` (0 or 1), `STARTUP_WINDOW` (seconds of probing, 20).
 
 ## Layout
 
